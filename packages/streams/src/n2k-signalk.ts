@@ -101,10 +101,8 @@ export default class N2kToSignalK extends Transform {
     string,
     Record<number, NotificationEntry>
   > = {}
-  private readonly lastNotifications: Record<
-    string,
-    Record<number, string>
-  > = {}
+  private readonly lastNotifications: Record<string, Record<number, string>> =
+    {}
   private readonly options: N2kToSignalKOptions
   private readonly app: N2kToSignalKOptions['app']
   private readonly filters?: N2kFilter[]

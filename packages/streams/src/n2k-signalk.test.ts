@@ -395,8 +395,7 @@ describe('N2kToSignalK notifications', () => {
     }
   }
 
-  const CHECK_ENGINE_PATH =
-    'notifications.propulsion.starboard.checkEngine'
+  const CHECK_ENGINE_PATH = 'notifications.propulsion.starboard.checkEngine'
 
   it('suppresses unchanged N2K notifications', async () => {
     const app = createMockApp()
@@ -508,11 +507,10 @@ describe('N2kToSignalK notifications', () => {
 
     const results = await outputPromise
 
-    // First alarm emitted; identical retransmission suppressed.
     expect(results).to.have.length(1)
   })
 
-  it('emits an alarm again after its last-emitted cache is cleared to normal', async () => {
+  it('emits an alarm again after the watchdog emits synthetic normal', async () => {
     const app = createMockApp()
     const stream = new N2kToSignalK({
       app,
@@ -524,9 +522,42 @@ describe('N2kToSignalK notifications', () => {
 
     stream.write(ENGINE_ALARM)
 
-    // Capture the actual value produced by the mapper so this test does
-    // not depend on notification message wording.
-    const firstResults = [] as Array<{
+    // Make the active alarm old enough for the next watchdog tick to
+    // emit its synthetic normal without waiting for the full timeout.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const notifications = (stream as any).notifications
+    notifications[CHECK_ENGINE_PATH][50].lastTime = Date.now() - 11000
+
+    // Wait for the watchdog's 5 second interval to run.
+    await new Promise((resolve) => setTimeout(resolve, 5100))
+
+    const syntheticNormal = app.handledMessages
+      .flatMap(({ delta }) => {
+        const typedDelta = delta as {
+          updates: Array<{
+            values: Array<{
+              path: string
+              value: { state: string }
+            }>
+          }>
+        }
+        return typedDelta.updates.flatMap((update) => update.values)
+      })
+      .find(
+        (value) =>
+          value.path === CHECK_ENGINE_PATH && value.value.state === 'normal'
+      )
+
+    expect(syntheticNormal).to.not.equal(undefined)
+
+    stream.write({
+      ...ENGINE_ALARM,
+      timestamp: '2024-01-01T00:00:11.000Z'
+    })
+
+    stream.end()
+
+    const results = (await outputPromise) as Array<{
       updates: Array<{
         values: Array<{
           path: string
@@ -538,33 +569,12 @@ describe('N2kToSignalK notifications', () => {
       }>
     }>
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const lastNotifications = (stream as any).lastNotifications
-    const alarmValue = JSON.parse(lastNotifications[CHECK_ENGINE_PATH][50])
-
-    // This is the cache state established when the production watchdog
-    // emits its synthetic normal through app.handleMessage().
-    lastNotifications[CHECK_ENGINE_PATH][50] = JSON.stringify({
-      ...alarmValue,
-      state: 'normal'
-    })
-
-    stream.write({
-      ...ENGINE_ALARM,
-      timestamp: '2024-01-01T00:00:11.000Z'
-    })
-
-    stream.end()
-
-    const results = (await outputPromise) as typeof firstResults
-
     const checkEngineStates = results
       .flatMap((delta) => delta.updates)
       .flatMap((update) => update.values)
       .filter((value) => value.path === CHECK_ENGINE_PATH)
       .map((value) => value.value.state)
 
-    // The original alarm and the returning alarm must both be emitted.
     expect(checkEngineStates).to.deep.equal(['alarm', 'alarm'])
   })
 })
