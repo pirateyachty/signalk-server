@@ -377,6 +377,16 @@ export default class N2kToSignalK extends Transform {
             const value = JSON.stringify(kv.value)
             const previous = this.lastNotifications[kv.path]![src]
 
+            console.log(
+              'N2K NOTIFICATION',
+              kv.path,
+              'src=', src,
+              'state=', kv.value.state,
+              'previous=', previous,
+              'value=', value,
+              'emit=', previous !== value
+            )
+
             if (previous === value) {
               return false
             }
