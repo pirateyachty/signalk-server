@@ -324,18 +324,81 @@ describe('N2kToSignalK canName warmup', () => {
     expect(await outputPromise).to.have.length(1)
   })
 
-  it('suppresses unchanged N2K notifications', async () => {
-    const ENGINE_NORMAL = {
+  it('an alarm dropped during warmup is delivered when it re-arrives after warmup', async () => {
+    // Answers the core question: notifications need no special-casing
+    // during warmup because N2K alarms are periodic (PGN 127489 every
+    // 500 ms). The same alarm that is held back mid-warmup flows through
+    // once the window passes.
+    const ENGINE_ALARM = {
       prio: 2,
       pgn: 127489,
       dst: 255,
       src: 50,
       timestamp: '2024-01-01T00:00:00.000Z',
-      fields: { engineInstance: 0, discreteStatus1: [] },
+      fields: { engineInstance: 0, discreteStatus1: ['Check Engine'] },
       description: 'Engine Parameters, Dynamic',
       id: 'engineParametersDynamic'
     }
 
+    const app = createMockApp()
+    const stream = new N2kToSignalK({
+      app,
+      providerId: 'canbus0',
+      useCanName: true,
+      canNameWarmupMs: 0
+    })
+
+    // Force the first frame into the warmup window, then let it lapse so
+    // the periodic retransmit lands after warmup — without real timers.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(stream as any).warmupUntil = Number.MAX_SAFE_INTEGER
+
+    const outputPromise = collectStreamOutput(stream)
+    stream.write(ENGINE_ALARM)
+
+    // Warmup elapsed: the alarm's next periodic broadcast gets through.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(stream as any).warmupUntil = 0
+    stream.write({
+      ...ENGINE_ALARM,
+      timestamp: '2024-01-01T00:00:00.500Z'
+    })
+    stream.end()
+
+    const results = (await outputPromise) as Array<{
+      updates: Array<{ values: Array<{ path: string }> }>
+    }>
+
+    expect(results).to.have.length(1)
+    const paths = results[0]!.updates[0]!.values.map((v) => v.path)
+    expect(paths).to.include('notifications.propulsion.starboard.checkEngine')
+  })
+})
+
+describe('N2kToSignalK notifications', () => {
+  const ENGINE_NORMAL = {
+    prio: 2,
+    pgn: 127489,
+    dst: 255,
+    src: 50,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    fields: { engineInstance: 0, discreteStatus1: [] },
+    description: 'Engine Parameters, Dynamic',
+    id: 'engineParametersDynamic'
+  }
+
+  const ENGINE_ALARM = {
+    ...ENGINE_NORMAL,
+    fields: {
+      engineInstance: 0,
+      discreteStatus1: ['Check Engine']
+    }
+  }
+
+  const CHECK_ENGINE_PATH =
+    'notifications.propulsion.starboard.checkEngine'
+
+  it('suppresses unchanged N2K notifications', async () => {
     const app = createMockApp()
     const stream = new N2kToSignalK({
       app,
@@ -368,31 +431,12 @@ describe('N2kToSignalK canName warmup', () => {
       .filter((value) => value.path.startsWith('notifications.'))
 
     expect(notifications.length).to.be.greaterThan(0)
-    expect(notifications.every((value) => value.value.state === 'normal')).to
-      .equal(true)
+    expect(
+      notifications.every((value) => value.value.state === 'normal')
+    ).to.equal(true)
   })
 
   it('emits a notification again when its state changes', async () => {
-    const ENGINE_NORMAL = {
-      prio: 2,
-      pgn: 127489,
-      dst: 255,
-      src: 50,
-      timestamp: '2024-01-01T00:00:00.000Z',
-      fields: { engineInstance: 0, discreteStatus1: [] },
-      description: 'Engine Parameters, Dynamic',
-      id: 'engineParametersDynamic'
-    }
-
-    const ENGINE_ALARM = {
-      ...ENGINE_NORMAL,
-      timestamp: '2024-01-01T00:00:00.500Z',
-      fields: {
-        engineInstance: 0,
-        discreteStatus1: ['Check Engine']
-      }
-    }
-
     const app = createMockApp()
     const stream = new N2kToSignalK({
       app,
@@ -403,7 +447,10 @@ describe('N2kToSignalK canName warmup', () => {
     const outputPromise = collectStreamOutput(stream)
 
     stream.write(ENGINE_NORMAL)
-    stream.write(ENGINE_ALARM)
+    stream.write({
+      ...ENGINE_ALARM,
+      timestamp: '2024-01-01T00:00:00.500Z'
+    })
     stream.end()
 
     const results = (await outputPromise) as Array<{
@@ -420,56 +467,104 @@ describe('N2kToSignalK canName warmup', () => {
     const checkEngineStates = results
       .flatMap((delta) => delta.updates)
       .flatMap((update) => update.values)
-      .filter(
-        (value) =>
-          value.path === 'notifications.propulsion.starboard.checkEngine'
-      )
+      .filter((value) => value.path === CHECK_ENGINE_PATH)
       .map((value) => value.value.state)
 
     expect(checkEngineStates).to.deep.equal(['normal', 'alarm'])
   })
 
-  it('an alarm dropped during warmup is delivered when it re-arrives after warmup', async () => {
-    // Answers the core question: notifications need no special-casing
-    // during warmup because N2K alarms are periodic (PGN 127489 every
-    // 500 ms). The same alarm that is held back mid-warmup flows through
-    // once the window passes.
-    const ENGINE_ALARM = {
-      prio: 2,
-      pgn: 127489,
-      dst: 255,
-      src: 50,
-      timestamp: '2024-01-01T00:00:00.000Z',
-      fields: { engineInstance: 0, discreteStatus1: ['Check Engine'] },
-      description: 'Engine Parameters, Dynamic',
-      id: 'engineParametersDynamic'
-    }
-
+  it('refreshes the alarm timeout when an unchanged alarm is suppressed', async () => {
     const app = createMockApp()
     const stream = new N2kToSignalK({
       app,
       providerId: 'canbus0',
-      useCanName: true,
       canNameWarmupMs: 0
     })
-    // Force the first frame into the warmup window, then let it lapse so
-    // the periodic retransmit lands after warmup — without real timers.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(stream as any).warmupUntil = Number.MAX_SAFE_INTEGER
 
     const outputPromise = collectStreamOutput(stream)
+
     stream.write(ENGINE_ALARM)
-    // Warmup elapsed: the alarm's next periodic broadcast gets through.
+
+    // The first alarm creates the existing watchdog entry.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(stream as any).warmupUntil = 0
-    stream.write({ ...ENGINE_ALARM, timestamp: '2024-01-01T00:00:00.500Z' })
+    const notifications = (stream as any).notifications
+    const entry = notifications[CHECK_ENGINE_PATH][50]
+
+    expect(entry).to.exist
+
+    // Put its bookkeeping timestamp into the past. Receiving the exact
+    // same alarm again must refresh this even though the outward
+    // notification itself will be suppressed by the deduper.
+    entry.lastTime = 1
+
+    stream.write({
+      ...ENGINE_ALARM,
+      timestamp: '2024-01-01T00:00:00.500Z'
+    })
+
+    expect(entry.lastTime).to.be.greaterThan(1)
+
     stream.end()
 
-    const results = (await outputPromise) as Array<{
-      updates: Array<{ values: Array<{ path: string }> }>
-    }>
+    const results = await outputPromise
+
+    // First alarm emitted; identical retransmission suppressed.
     expect(results).to.have.length(1)
-    const paths = results[0]!.updates[0]!.values.map((v) => v.path)
-    expect(paths).to.include('notifications.propulsion.starboard.checkEngine')
+  })
+
+  it('emits an alarm again after its last-emitted cache is cleared to normal', async () => {
+    const app = createMockApp()
+    const stream = new N2kToSignalK({
+      app,
+      providerId: 'canbus0',
+      canNameWarmupMs: 0
+    })
+
+    const outputPromise = collectStreamOutput(stream)
+
+    stream.write(ENGINE_ALARM)
+
+    // Capture the actual value produced by the mapper so this test does
+    // not depend on notification message wording.
+    const firstResults = [] as Array<{
+      updates: Array<{
+        values: Array<{
+          path: string
+          value: {
+            state: string
+            [key: string]: unknown
+          }
+        }>
+      }>
+    }>
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lastNotifications = (stream as any).lastNotifications
+    const alarmValue = JSON.parse(lastNotifications[CHECK_ENGINE_PATH][50])
+
+    // This is the cache state established when the production watchdog
+    // emits its synthetic normal through app.handleMessage().
+    lastNotifications[CHECK_ENGINE_PATH][50] = JSON.stringify({
+      ...alarmValue,
+      state: 'normal'
+    })
+
+    stream.write({
+      ...ENGINE_ALARM,
+      timestamp: '2024-01-01T00:00:11.000Z'
+    })
+
+    stream.end()
+
+    const results = (await outputPromise) as typeof firstResults
+
+    const checkEngineStates = results
+      .flatMap((delta) => delta.updates)
+      .flatMap((update) => update.values)
+      .filter((value) => value.path === CHECK_ENGINE_PATH)
+      .map((value) => value.value.state)
+
+    // The original alarm and the returning alarm must both be emitted.
+    expect(checkEngineStates).to.deep.equal(['alarm', 'alarm'])
   })
 })
