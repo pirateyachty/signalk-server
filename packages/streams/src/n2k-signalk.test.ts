@@ -324,6 +324,111 @@ describe('N2kToSignalK canName warmup', () => {
     expect(await outputPromise).to.have.length(1)
   })
 
+  it('suppresses unchanged N2K notifications', async () => {
+    const ENGINE_NORMAL = {
+      prio: 2,
+      pgn: 127489,
+      dst: 255,
+      src: 50,
+      timestamp: '2024-01-01T00:00:00.000Z',
+      fields: { engineInstance: 0, discreteStatus1: [] },
+      description: 'Engine Parameters, Dynamic',
+      id: 'engineParametersDynamic'
+    }
+
+    const app = createMockApp()
+    const stream = new N2kToSignalK({
+      app,
+      providerId: 'canbus0',
+      canNameWarmupMs: 0
+    })
+
+    const outputPromise = collectStreamOutput(stream)
+
+    stream.write(ENGINE_NORMAL)
+    stream.write({
+      ...ENGINE_NORMAL,
+      timestamp: '2024-01-01T00:00:00.500Z'
+    })
+    stream.end()
+
+    const results = (await outputPromise) as Array<{
+      updates: Array<{
+        values: Array<{
+          path: string
+          value: { state: string }
+        }>
+      }>
+    }>
+
+    expect(results).to.have.length(1)
+
+    const notifications = results[0]!.updates
+      .flatMap((update) => update.values)
+      .filter((value) => value.path.startsWith('notifications.'))
+
+    expect(notifications.length).to.be.greaterThan(0)
+    expect(notifications.every((value) => value.value.state === 'normal')).to
+      .equal(true)
+  })
+
+  it('emits a notification again when its state changes', async () => {
+    const ENGINE_NORMAL = {
+      prio: 2,
+      pgn: 127489,
+      dst: 255,
+      src: 50,
+      timestamp: '2024-01-01T00:00:00.000Z',
+      fields: { engineInstance: 0, discreteStatus1: [] },
+      description: 'Engine Parameters, Dynamic',
+      id: 'engineParametersDynamic'
+    }
+
+    const ENGINE_ALARM = {
+      ...ENGINE_NORMAL,
+      timestamp: '2024-01-01T00:00:00.500Z',
+      fields: {
+        engineInstance: 0,
+        discreteStatus1: ['Check Engine']
+      }
+    }
+
+    const app = createMockApp()
+    const stream = new N2kToSignalK({
+      app,
+      providerId: 'canbus0',
+      canNameWarmupMs: 0
+    })
+
+    const outputPromise = collectStreamOutput(stream)
+
+    stream.write(ENGINE_NORMAL)
+    stream.write(ENGINE_ALARM)
+    stream.end()
+
+    const results = (await outputPromise) as Array<{
+      updates: Array<{
+        values: Array<{
+          path: string
+          value: { state: string }
+        }>
+      }>
+    }>
+
+    expect(results).to.have.length(2)
+
+    const checkEngineStates = results
+      .flatMap((delta) => delta.updates)
+      .flatMap((update) => update.values)
+      .filter(
+        (value) =>
+          value.path === 'notifications.propulsion.starboard.checkEngine'
+      )
+      .map((value) => value.value.state)
+
+    expect(checkEngineStates).to.deep.equal(['normal', 'alarm'])
+  })
+
   it('an alarm dropped during warmup is delivered when it re-arrives after warmup', async () => {
     // Answers the core question: notifications need no special-casing
     // during warmup because N2K alarms are periodic (PGN 127489 every
