@@ -54,6 +54,9 @@ jobs:
           file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            BASE_IMAGE=24.04-24.x
+            EDITION=full
           tags: |
             ${{ env.IMAGE_NAME }}:notification-dedup
             ${{ env.IMAGE_NAME }}:notification-dedup-${{ github.sha }}
